@@ -876,13 +876,47 @@ class RFInversionFluxPipeline(
                 )[0]
 
                 latents_dtype = latents.dtype
+                
+         
                 if do_rf_inversion:
                     v_t = -noise_pred
-                    v_t_cond = (y_0 - latents) / (1 - t_i)
+                    
+                    x_1 = latents + v_t * (1 - t_i)
+
+                    y_hat_0 = x_1.clone().detach().requires_grad_(True)
+                    optimizer = torch.optim.Adam([y_hat_0], lr=0.1)
+                    
+                    # Add this tqdm wrapper around the optimization loop
+                    num_opt_steps = 10
+                    opt_progress = tqdm(range(num_opt_steps), desc=f"Timestep {i}/{len(timesteps)-1} optimization", 
+                                        leave=False, position=1)
+                    best_loss = float('inf')
+                    
+                    for opt_step in opt_progress:
+                        loss1 = torch.nn.functional.mse_loss(mask * ori_latents, mask * y_hat_0)
+                        loss2 = torch.nn.functional.mse_loss(x_1, y_hat_0)
+                        loss = loss1 + lambda_weight * loss2
+                        optimizer.zero_grad()
+                        loss.backward()
+                        optimizer.step()
+                        
+                        # Update progress bar with loss values
+                        opt_progress.set_postfix({
+                            'loss': f"{loss.item():.4f}",
+                            'mask_loss': f"{loss1.item():.4f}", 
+                            'pred_loss': f"{loss2.item():.4f}"
+                        })
+                        
+                        # Track best loss
+                        if loss.item() < best_loss:
+                            best_loss = loss.item()
+                    
+                    v_t_cond = (y_hat_0 - latents) / (1 - t_i)
                     eta_t = eta if start_timestep <= i < stop_timestep else 0.0
                     if decay_eta:
                         eta_t = eta_t * (1 - i / num_inference_steps) ** eta_decay_power  # Decay eta over the loop
                     v_hat_t = v_t + eta_t * (v_t_cond - v_t)
+
 
                     # SDE Eq: 17 from https://arxiv.org/pdf/2410.10792
                     latents = latents + v_hat_t * (sigmas[i] - sigmas[i + 1])
@@ -1056,3 +1090,88 @@ class RFInversionFluxPipeline(
 
         # return the inverted latents (start point for the denoising loop), encoded image & latent image ids
         return Y_t, image_latents, latent_image_ids
+    
+if __name__ == "__main__":
+    import argparse
+    #import wandb
+    import torch
+    from PIL import Image
+    from io import BytesIO
+    import requests
+    from diffusers.utils import load_image
+    from pipeline_flux_rf_inversion_yhat import FluxRFInversionPipeline
+   # from diffusers import FluxImg2ImgPipeline
+
+    def main():
+        parser = argparse.ArgumentParser(description="Run Flux RF Inversion Pipeline")
+        parser.add_argument("--model", type=str, default="black-forest-labs/FLUX.1-dev")
+        parser.add_argument("--image", type=str, required=True)
+        #parser.add_argument("--image", type=str, default="https://raw.githubusercontent.com/CompVis/stable-diffusion/main/assets/stable-samples/img2img/sketch-mountains-input.jpg")
+        parser.add_argument("--prompt", type=str, default="cat wizard, gandalf, lord of the rings, detailed, fantasy, cute, adorable, Pixar, Disney, 8k")
+        parser.add_argument("--prompt_2", type=str)
+        parser.add_argument("--num_inference_steps", type=int, default=28)
+        parser.add_argument("--strength", type=float, default=0.95)
+        parser.add_argument("--guidance_scale", type=float, default=3.5)
+        parser.add_argument("--gamma", type=float, default=0.5)
+        parser.add_argument("--eta", type=float, default=0.9)
+        parser.add_argument("--start_timestep", type=int, default=0)
+        parser.add_argument("--stop_timestep", type=int, default=6)
+        parser.add_argument("--output", type=str, default="output.jpg")
+        parser.add_argument("--num_images", type=int, default=1)
+
+        args = parser.parse_args()
+
+        #wandb.init(project="rf-inversion-debug", name="cli-run")
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        
+
+    #    if args.use_img2img:
+    #        pipe = FluxImg2ImgPipeline.from_pretrained(args.model, torch_dtype=torch.bfloat16, cache_dir="storage/ice-shared/ae8803che/lmkh3/")
+        #else:
+        #pipe = FluxRFInversionPipeline.from_pretrained(args.model, torch_dtype=torch.bfloat16, cahce_dir="/storage/ice-shared/ae8803che/lmkh3/")
+        
+        #
+        
+        # breakpoint()
+        pipe = FluxPipeline.from_pretrained(
+        args.model,
+        torch_dtype=torch.bfloat16,
+        cache_dir="/storage/ice-shared/ae8803che/lmkh3/",
+        custom_pipeline="pipeline_flux_rf_inversion"
+    )
+
+            
+        pipe.to("cuda")
+        pipe = FluxRFInversionPipeline.from_pipe(pipe) 
+
+        if args.image.startswith("http"):
+            init_image = load_image(args.image).resize((1024, 1024))
+        else:
+            init_image = Image.open(args.image).resize((1024, 1024))
+            
+
+        prompt_2 = args.prompt_2 if args.prompt_2 else args.prompt
+        save_base, ext = args.output.rsplit(".", 1)
+
+        for i in range(args.num_images):
+            kwargs = {
+                "gamma": args.gamma,
+                "eta": args.eta,
+                "start_timestep": args.start_timestep,
+                "stop_timestep": args.stop_timestep
+            } #if not args.use_img2img else dict()
+
+            result = pipe(
+                prompt=args.prompt,
+                prompt_2=prompt_2,
+                image=init_image,
+                num_inference_steps=args.num_inference_steps,
+                strength=args.strength,
+                guidance_scale=args.guidance_scale,
+                **kwargs
+            )
+
+            result.images[0].save(f"{save_base}_{i}.{ext}")
+            print(f"Output image saved as {save_base}_{i}.{ext}")
+
+    main()

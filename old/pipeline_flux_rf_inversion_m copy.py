@@ -194,10 +194,6 @@ class RFInversionFluxPipeline(
             [T5TokenizerFast](https://huggingface.co/docs/transformers/en/model_doc/t5#transformers.T5TokenizerFast).
     """
 
-    model_cpu_offload_seq = "text_encoder->text_encoder_2->transformer->vae"
-    _optional_components = []
-    _callback_tensor_inputs = ["latents", "prompt_embeds"]
-
     def __init__(
         self,
         scheduler: FlowMatchEulerDiscreteScheduler,
@@ -207,6 +203,11 @@ class RFInversionFluxPipeline(
         text_encoder_2: T5EncoderModel,
         tokenizer_2: T5TokenizerFast,
         transformer: FluxTransformer2DModel,
+        mask_type="SAM",
+        args
+        
+       
+  
     ):
         super().__init__()
 
@@ -225,6 +226,22 @@ class RFInversionFluxPipeline(
             self.tokenizer.model_max_length if hasattr(self, "tokenizer") and self.tokenizer is not None else 77
         )
         self.default_sample_size = 128
+        
+        #####added#######
+        self.seed = args.seed
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.dtype = torch.float32
+        self._execution_device = self.device
+        self.default_sample_size = 64
+        self.c_in = 4
+        self.mask_type = args.mask_type
+        if self.mask_type == "SAM":
+            self.sam = SAM(args, log_dir = self.result_folder)
+         self.result_folder = os.path.join(args.result_folder, f"for_prompt_{args.for_prompt}_seed{args.seed}")
+        if not os.path.exists(self.result_folder):
+            os.makedirs(self.result_folder)
+
+
 
     # Copied from diffusers.pipelines.flux.pipeline_flux.FluxPipeline._get_t5_prompt_embeds
     def _get_t5_prompt_embeds(
@@ -633,10 +650,43 @@ class RFInversionFluxPipeline(
     @property
     def interrupt(self):
         return self._interrupt
-
+    # utils
+    def _get_prompt_emb(self, prompt):
+        prompt_embeds = self.encode_prompt(
+            prompt,
+            device = self.device,
+            num_images_per_prompt = 1,
+            do_classifier_free_guidance = False,
+        )[0]
+        return prompt_embeds
     @torch.no_grad()
     @replace_example_docstring(EXAMPLE_DOC_STRING)
+
+# Patched and refactored __call__ method section
+# Assumes this is inside a class with proper attributes defined
+
+
+    # ========== Utility ==========
+    # Encode a prompt using the underlying pipeline's encode_prompt method
+    def _get_prompt_emb(self, prompt):
+        prompt_embeds = self.pipe.encode_prompt(
+            prompt,
+            device=self.device,
+            num_images_per_prompt=1,
+            do_classifier_free_guidance=False,
+        )[0]
+        return prompt_embeds
+
+    # Compute y_hat minimizing masked error + latent similarity
+    def _compute_y_hat(self, image_latents, x_1, mask, lambda_reg=1.0):
+        masked_y0 = mask * image_latents
+        y_hat = (masked_y0 + lambda_reg * x_1) / (mask + lambda_reg + 1e-6)
+        return y_hat
+
+    # ========== Main Inference Call ==========
     def __call__(
+        self,
+        edit_prompt: str,
         self,
         prompt: Union[str, List[str]] = None,
         prompt_2: Optional[Union[str, List[str]]] = None,
@@ -666,90 +716,13 @@ class RFInversionFluxPipeline(
         callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
         max_sequence_length: int = 512,
+        image: Optional[torch.FloatTensor] = None,
+        mask_index: int = 0
     ):
-        r"""
-        Function invoked when calling the pipeline for generation.
-
-        Args:
-            prompt (`str` or `List[str]`, *optional*):
-                The prompt or prompts to guide the image generation. If not defined, one has to pass `prompt_embeds`.
-                instead.
-            prompt_2 (`str` or `List[str]`, *optional*):
-                The prompt or prompts to be sent to `tokenizer_2` and `text_encoder_2`. If not defined, `prompt` is
-                will be used instead
-            inverted_latents (`torch.Tensor`, *optional*):
-                The inverted latents from `pipe.invert`.
-            image_latents (`torch.Tensor`, *optional*):
-                The image latents from `pipe.invert`.
-            latent_image_ids (`torch.Tensor`, *optional*):
-                The latent image ids from `pipe.invert`.
-            height (`int`, *optional*, defaults to self.unet.config.sample_size * self.vae_scale_factor):
-                The height in pixels of the generated image. This is set to 1024 by default for the best results.
-            width (`int`, *optional*, defaults to self.unet.config.sample_size * self.vae_scale_factor):
-                The width in pixels of the generated image. This is set to 1024 by default for the best results.
-            eta (`float`, *optional*, defaults to 1.0):
-                The controller guidance, balancing faithfulness & editability:
-                higher eta - better faithfullness, less editability. For more significant edits, lower the value of eta.
-            num_inference_steps (`int`, *optional*, defaults to 50):
-                The number of denoising steps. More denoising steps usually lead to a higher quality image at the
-                expense of slower inference.
-            timesteps (`List[int]`, *optional*):
-                Custom timesteps to use for the denoising process with schedulers which support a `timesteps` argument
-                in their `set_timesteps` method. If not defined, the default behavior when `num_inference_steps` is
-                passed will be used. Must be in descending order.
-            guidance_scale (`float`, *optional*, defaults to 7.0):
-                Guidance scale as defined in [Classifier-Free Diffusion Guidance](https://arxiv.org/abs/2207.12598).
-                `guidance_scale` is defined as `w` of equation 2. of [Imagen
-                Paper](https://arxiv.org/pdf/2205.11487.pdf). Guidance scale is enabled by setting `guidance_scale >
-                1`. Higher guidance scale encourages to generate images that are closely linked to the text `prompt`,
-                usually at the expense of lower image quality.
-            num_images_per_prompt (`int`, *optional*, defaults to 1):
-                The number of images to generate per prompt.
-            generator (`torch.Generator` or `List[torch.Generator]`, *optional*):
-                One or a list of [torch generator(s)](https://pytorch.org/docs/stable/generated/torch.Generator.html)
-                to make generation deterministic.
-            latents (`torch.FloatTensor`, *optional*):
-                Pre-generated noisy latents, sampled from a Gaussian distribution, to be used as inputs for image
-                generation. Can be used to tweak the same generation with different prompts. If not provided, a latents
-                tensor will ge generated by sampling using the supplied random `generator`.
-            prompt_embeds (`torch.FloatTensor`, *optional*):
-                Pre-generated text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt weighting. If not
-                provided, text embeddings will be generated from `prompt` input argument.
-            pooled_prompt_embeds (`torch.FloatTensor`, *optional*):
-                Pre-generated pooled text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt weighting.
-                If not provided, pooled text embeddings will be generated from `prompt` input argument.
-            output_type (`str`, *optional*, defaults to `"pil"`):
-                The output format of the generate image. Choose between
-                [PIL](https://pillow.readthedocs.io/en/stable/): `PIL.Image.Image` or `np.array`.
-            return_dict (`bool`, *optional*, defaults to `True`):
-                Whether to return a [`~pipelines.flux.FluxPipelineOutput`] instead of a plain tuple.
-            joint_attention_kwargs (`dict`, *optional*):
-                A kwargs dictionary that if specified is passed along to the `AttentionProcessor` as defined under
-                `self.processor` in
-                [diffusers.models.attention_processor](https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/attention_processor.py).
-            callback_on_step_end (`Callable`, *optional*):
-                A function that calls at the end of each denoising steps during the inference. The function is called
-                with the following arguments: `callback_on_step_end(self: DiffusionPipeline, step: int, timestep: int,
-                callback_kwargs: Dict)`. `callback_kwargs` will include a list of all tensors as specified by
-                `callback_on_step_end_tensor_inputs`.
-            callback_on_step_end_tensor_inputs (`List`, *optional*):
-                The list of tensor inputs for the `callback_on_step_end` function. The tensors specified in the list
-                will be passed as `callback_kwargs` argument. You will only be able to include variables listed in the
-                `._callback_tensor_inputs` attribute of your pipeline class.
-            max_sequence_length (`int` defaults to 512): Maximum sequence length to use with the `prompt`.
-
-        Examples:
-
-        Returns:
-            [`~pipelines.flux.FluxPipelineOutput`] or `tuple`: [`~pipelines.flux.FluxPipelineOutput`] if `return_dict`
-            is True, otherwise a `tuple`. When returning a tuple, the first element is a list with the generated
-            images.
-        """
-
+        # ========== Defaults and Input Checking ==========
         height = height or self.default_sample_size * self.vae_scale_factor
         width = width or self.default_sample_size * self.vae_scale_factor
 
-        # 1. Check inputs. Raise error if not correct
         self.check_inputs(
             prompt,
             prompt_2,
@@ -766,12 +739,13 @@ class RFInversionFluxPipeline(
             max_sequence_length=max_sequence_length,
         )
 
+        # ========== Init State ==========
         self._guidance_scale = guidance_scale
         self._joint_attention_kwargs = joint_attention_kwargs
         self._interrupt = False
         do_rf_inversion = inverted_latents is not None
 
-        # 2. Define call parameters
+        # ========== Determine Batch Size ==========
         if prompt is not None and isinstance(prompt, str):
             batch_size = 1
         elif prompt is not None and isinstance(prompt, list):
@@ -781,6 +755,7 @@ class RFInversionFluxPipeline(
 
         device = self._execution_device
 
+        # ========== Encode Prompts ==========
         lora_scale = (
             self.joint_attention_kwargs.get("scale", None) if self.joint_attention_kwargs is not None else None
         )
@@ -799,7 +774,7 @@ class RFInversionFluxPipeline(
             lora_scale=lora_scale,
         )
 
-        # 4. Prepare latent variables
+        # ========== Prepare Latents ==========
         num_channels_latents = self.transformer.config.in_channels // 4
         if do_rf_inversion:
             latents = inverted_latents
@@ -815,7 +790,7 @@ class RFInversionFluxPipeline(
                 latents,
             )
 
-        # 5. Prepare timesteps
+        # ========== Prepare Timesteps ==========
         sigmas = np.linspace(1.0, 1 / num_inference_steps, num_inference_steps) if sigmas is None else sigmas
         image_seq_len = (int(height) // self.vae_scale_factor // 2) * (int(width) // self.vae_scale_factor // 2)
         mu = calculate_shift(
@@ -837,30 +812,105 @@ class RFInversionFluxPipeline(
             start_timestep = int(start_timestep * num_inference_steps)
             stop_timestep = min(int(stop_timestep * num_inference_steps), num_inference_steps)
             timesteps, sigmas, num_inference_steps = self.get_timesteps(num_inference_steps, strength)
+
+        # ========== Final Scheduler State ==========
         num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
         self._num_timesteps = len(timesteps)
 
-        # handle guidance
+        # ========== Optional Guidance Embedding ==========
         if self.transformer.config.guidance_embeds:
             guidance = torch.full([1], guidance_scale, device=device, dtype=torch.float32)
             guidance = guidance.expand(latents.shape[0])
         else:
             guidance = None
 
-        if do_rf_inversion:
-            y_0 = image_latents.clone()
-        # 6. Denoising loop / Controlled Reverse ODE, Algorithm 2 from: https://arxiv.org/pdf/2410.10792
+        # ========== Required Edit Prompt Embedding ==========
+        self.edit_prompt = edit_prompt
+        self.edit_prompt_emb = self._get_prompt_emb(edit_prompt)
+
+        # ========== Prepare Init Image ==========
+        init_image = self.image_processor.preprocess(image, height=height, width=width).to(dtype=torch.float32)
+
+        # ========== Redundant Prompt Setup (TODO: Remove?) ==========
+        batch_size = 1 if isinstance(prompt, str) else len(prompt) if isinstance(prompt, list) else prompt_embeds.shape[0]
+        device = self._execution_device
+        lora_scale = self._joint_attention_kwargs.get("scale", None) if self._joint_attention_kwargs else None
+        prompt_embeds, pooled_prompt_embeds, text_ids = self.encode_prompt(
+            prompt, prompt_2, prompt_embeds, pooled_prompt_embeds,
+            device, num_images_per_prompt, max_sequence_length, lora_scale)
+        null_prompt_embeds, null_pooled_prompt_embeds, null_text_ids = self.encode_prompt(
+            "", "", None, None,
+            device, num_images_per_prompt, max_sequence_length, lora_scale)
+
+        self.for_prompt_emb = prompt_embeds
+        self.null_prompt_emb = null_prompt_embeds
+        if not hasattr(self, "edit_prompt_emb"):
+            self.edit_prompt_emb = None
+
+        # ========== Random Noise for Denoising ==========
+        xT = torch.randn(1, self.c_in, self.image_size, self.image_size, dtype=self.dtype, device=self.device)
+
+        # ========== SAM Masking (Required) ==========
+        assert self.args.mask_type == "SAM", "Only SAM masking is supported."
+        # Perform SAM masking
+            mask_path = os.path.join(self.result_folder, "mask/mask.pt")
+            image_path = os.path.join(self.result_folder, "original_stage1.png")
+
+            if not os.path.exists(image_path) or not os.path.exists(mask_path):
+                print("Generating images and creating masks......")
+                self.EXP_NAME = "original"
+                x0 = self.DDPMforwardsteps(
+                    xT, t_start_idx=0, t_end_idx=-1,
+                    for_prompt_emb=self.for_prompt_emb,
+                    edit_prompt_emb=self.edit_prompt_emb,
+                    null_prompt_emb=self.null_prompt_emb,
+                    mode="null+(for-null)"
+                )
+                x0_stage2_pil, x0_stage3_pil = self.superresolution(
+                    [Image.fromarray(x0[0].detach().cpu().numpy())],
+                    self.for_prompt, self.for_prompt_emb, self.null_prompt_emb
+                )
+                masks = self.sam.mask_segmentation(x0_stage2_pil, resolution=self.image_size)
+            else:
+                print("Loading masks......")
+                masks = torch.load(mask_path)
+
+            mask = masks[mask_index].squeeze(dim=0).repeat(3, 1, 1)
+
+        # ========== Denoising Loop / Controlled Reverse ODE ==========
+        # Additional computation example: x₁ = xₜ + v(xₜ, t, edit_prompt) * (1 - t)
+        # Use edit prompt embedding and latents to compute velocity
+        with torch.no_grad():
+            timestep_scalar = timesteps[0] / 1000  # example timestep for demo
+            timestep_tensor = timestep_scalar.expand(latents.shape[0]).to(latents.dtype)
+            v_xt = self.transformer(
+                hidden_states=latents,
+                timestep=timestep_tensor,
+                guidance=guidance,
+                pooled_projections=pooled_prompt_embeds,
+                encoder_hidden_states=self.edit_prompt_emb,
+                txt_ids=text_ids,
+                img_ids=latent_image_ids,
+                joint_attention_kwargs=self._joint_attention_kwargs,
+                return_dict=False,
+            )[0]
+            x_1 = latents + v_xt * (1 - timestep_scalar)
+        # Compute ŷ_hat from x₁ and image_latents using helper
+        y_hat = self._compute_y_hat(image_latents, x_1, mask)
+
+        # Run iterative denoising loop with velocity or scheduler update per timestep
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
                 if do_rf_inversion:
-                    # ti (current timestep) as annotated in algorithm 2 - i/num_inference_steps.
-                    t_i = 1 - t / 1000
-                    dt = torch.tensor(1 / (len(timesteps) - 1), device=device)
+                                    # Normalize timestep for reverse ODE
+                t_i = 1 - t / 1000
+                                    # Compute fixed time step size for continuous update (not used directly)
+                dt = torch.tensor(1 / (len(timesteps) - 1), device=device)
 
                 if self.interrupt:
                     continue
 
-                # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
+                                # Expand scalar timestep to match batch shape
                 timestep = t.expand(latents.shape[0]).to(latents.dtype)
 
                 noise_pred = self.transformer(
@@ -875,58 +925,64 @@ class RFInversionFluxPipeline(
                     return_dict=False,
                 )[0]
 
+                                # Track original latent dtype to restore after processing
                 latents_dtype = latents.dtype
                 if do_rf_inversion:
+                                        # Reverse velocity from noise prediction (ODE derivative)
                     v_t = -noise_pred
-                    v_t_cond = (y_0 - latents) / (1 - t_i)
+                                        # Conditional velocity from target (y_hat) direction
+                    v_t_cond = (y_hat - latents) / (1 - t_i + 1e-6)
+                                        # Apply eta weighting only within specified time window
                     eta_t = eta if start_timestep <= i < stop_timestep else 0.0
                     if decay_eta:
-                        eta_t = eta_t * (1 - i / num_inference_steps) ** eta_decay_power  # Decay eta over the loop
+                                                # Decay eta over time if enabled
+                        eta_t = eta_t * (1 - i / num_inference_steps) ** eta_decay_power
+                                        # Final weighted velocity update
                     v_hat_t = v_t + eta_t * (v_t_cond - v_t)
-
-                    # SDE Eq: 17 from https://arxiv.org/pdf/2410.10792
+                                        # Integrate latent update using differential step
                     latents = latents + v_hat_t * (sigmas[i] - sigmas[i + 1])
                 else:
-                    # compute the previous noisy sample x_t -> x_t-1
+                                        # Use built-in scheduler to update latents in non-inversion case
                     latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
 
                 if latents.dtype != latents_dtype:
                     if torch.backends.mps.is_available():
-                        # some platforms (eg. apple mps) misbehave due to a pytorch bug: https://github.com/pytorch/pytorch/pull/99272
+                                                # Patch dtype mismatch (e.g. MPS bug workaround)
                         latents = latents.to(latents_dtype)
 
                 if callback_on_step_end is not None:
-                    callback_kwargs = {}
-                    for k in callback_on_step_end_tensor_inputs:
-                        callback_kwargs[k] = locals()[k]
+                                        # Prepare callback input values dynamically by name
+                    callback_kwargs = {k: locals()[k] for k in callback_on_step_end_tensor_inputs}
                     callback_outputs = callback_on_step_end(self, i, t, callback_kwargs)
-
                     latents = callback_outputs.pop("latents", latents)
                     prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
 
-                # call the callback, if provided
                 if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
+                                        # Update visual progress bar if conditions match
                     progress_bar.update()
 
                 if XLA_AVAILABLE:
+                    # XLA optimization step for TPU/multi-core execution
                     xm.mark_step()
 
+        # ========== Output Handling ==========
         if output_type == "latent":
-            image = latents
-
+            image = latents  # Return raw latents if requested
         else:
+            # Decode latents to image space using VAE
             latents = self._unpack_latents(latents, height, width, self.vae_scale_factor)
             latents = (latents / self.vae.config.scaling_factor) + self.vae.config.shift_factor
             image = self.vae.decode(latents, return_dict=False)[0]
             image = self.image_processor.postprocess(image, output_type=output_type)
 
-        # Offload all models
+        # Offload models/hooks
         self.maybe_free_model_hooks()
 
         if not return_dict:
             return (image,)
 
-        return FluxPipelineOutput(images=image)
+        return FluxPipelineOutput(images=image, y_hat=y_hat)
+
 
     @torch.no_grad()
     def invert(

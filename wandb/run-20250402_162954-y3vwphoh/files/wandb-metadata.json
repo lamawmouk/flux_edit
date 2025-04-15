@@ -1,0 +1,127 @@
+{
+  "os":  "Linux-5.14.0-427.42.1.el9_4.x86_64-x86_64-with-glibc2.34",
+  "python":  "3.10.16",
+  "startedAt":  "2025-04-02T20:29:54.807192Z",
+  "program":  "/home/hice1/lmoukheiber3/rf_inversion/main.py",
+  "codePath":  "main.py",
+  "git":  {
+    "remote":  "https://github.com/raven38/rf_inversion.git",
+    "commit":  "3cde0f85c45f945579c6f5daa66fbaf59dc70919"
+  },
+  "email":  "lamawmouk@gmail.com",
+  "root":  "/home/hice1/lmoukheiber3/rf_inversion",
+  "host":  "atl1-1-01-005-7-0.pace.gatech.edu",
+  "username":  "lmoukheiber3",
+  "executable":  "/home/hice1/lmoukheiber3/.conda/envs/my_env/bin/python",
+  "codePathLocal":  "main.py",
+  "cpu_count":  24,
+  "cpu_count_logical":  24,
+  "gpu":  "Quadro RTX 6000",
+  "gpu_count":  4,
+  "disk":  {
+    "/":  {
+      "total":  "53619982336",
+      "used":  "27593527296"
+    }
+  },
+  "memory":  {
+    "total":  "403759030272"
+  },
+  "cpu":  {
+    "count":  24,
+    "countLogical":  24
+  },
+  "gpu_nvidia":  [
+    {
+      "name":  "Quadro RTX 6000",
+      "memoryTotal":  "24159191040",
+      "cudaCores":  4608,
+      "architecture":  "Turing"
+    },
+    {
+      "name":  "Quadro RTX 6000",
+      "memoryTotal":  "24159191040",
+      "cudaCores":  4608,
+      "architecture":  "Turing"
+    },
+    {
+      "name":  "Quadro RTX 6000",
+      "memoryTotal":  "24159191040",
+      "cudaCores":  4608,
+      "architecture":  "Turing"
+    },
+    {
+      "name":  "Quadro RTX 6000",
+      "memoryTotal":  "24159191040",
+      "cudaCores":  4608,
+      "architecture":  "Turing"
+    }
+  ],
+  "slurm":  {
+    "cluster_name":  "ice-slurm",
+    "conf":  "/var/lib/slurm/slurmd/conf-cache/slurm.conf",
+    "cpu_bind":  "quiet,mask_cpu:0x00000F",
+    "cpu_bind_list":  "0x00000F",
+    "cpu_bind_type":  "mask_cpu:",
+    "cpu_bind_verbose":  "quiet",
+    "cpus_on_node":  "4",
+    "cpus_per_task":  "4",
+    "distribution":  "block",
+    "gpus_on_node":  "4",
+    "gtids":  "0",
+    "job_account":  "bmed",
+    "job_cpus_per_node":  "4",
+    "job_end_time":  "1743638706",
+    "job_gid":  "2626",
+    "job_group":  "gtperson",
+    "job_id":  "2401558",
+    "job_name":  "bash",
+    "job_nodelist":  "atl1-1-01-005-7-0",
+    "job_num_nodes":  "1",
+    "job_partition":  "ice-gpu",
+    "job_qos":  "coe-ice",
+    "job_start_time":  "1743624306",
+    "job_uid":  "3447096",
+    "job_user":  "lmoukheiber3",
+    "jobid":  "2401558",
+    "launch_node_ipaddr":  "128.61.254.108",
+    "localid":  "0",
+    "mem_per_cpu":  "6144",
+    "mpi_type":  "pmix_v4",
+    "nnodes":  "1",
+    "nodeid":  "0",
+    "nodelist":  "atl1-1-01-005-7-0",
+    "nprocs":  "1",
+    "ntasks":  "1",
+    "oom_kill_step":  "0",
+    "pmix_mapping_serv":  "(vector,(0,1,1))",
+    "pmix_tmpdir":  "/tmp",
+    "pmixp_abort_agent_port":  "43579",
+    "prio_process":  "0",
+    "procid":  "0",
+    "pty_port":  "40171",
+    "pty_win_col":  "164",
+    "pty_win_row":  "33",
+    "root":  "/opt/slurm/current",
+    "script_context":  "prolog_task",
+    "srun_comm_host":  "128.61.254.108",
+    "srun_comm_port":  "35563",
+    "step_gpus":  "0,1,2,3",
+    "step_id":  "0",
+    "step_launcher_port":  "35563",
+    "step_nodelist":  "atl1-1-01-005-7-0",
+    "step_num_nodes":  "1",
+    "step_num_tasks":  "1",
+    "step_tasks_per_node":  "1",
+    "stepid":  "0",
+    "submit_dir":  "/home/hice1/lmoukheiber3/rf_inversion",
+    "submit_host":  "login-ice-4.pace.gatech.edu",
+    "task_pid":  "3400367",
+    "tasks_per_node":  "1",
+    "topology_addr":  "atl1-1-01-005-7-0",
+    "topology_addr_pattern":  "node",
+    "tres_per_task":  "cpu=4",
+    "umask":  "0022"
+  },
+  "cudaVersion":  "12.5"
+}
