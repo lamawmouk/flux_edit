@@ -162,7 +162,7 @@ def retrieve_timesteps(
     return timesteps, num_inference_steps
 
 
-class RFInversionFluxPipeline(
+class FluxRFInversionPipeline(
     DiffusionPipeline,
     FluxLoraLoaderMixin,
     FromSingleFileMixin,
@@ -641,6 +641,7 @@ class RFInversionFluxPipeline(
         prompt: Union[str, List[str]] = None,
         prompt_2: Optional[Union[str, List[str]]] = None,
         inverted_latents: Optional[torch.FloatTensor] = None,
+        image: PipelineImageInput = None,
         image_latents: Optional[torch.FloatTensor] = None,
         latent_image_ids: Optional[torch.FloatTensor] = None,
         height: Optional[int] = None,
@@ -666,6 +667,8 @@ class RFInversionFluxPipeline(
         callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
         max_sequence_length: int = 512,
+        enable_sde: bool = True,
+    
     ):
         r"""
         Function invoked when calling the pipeline for generation.
@@ -846,6 +849,67 @@ class RFInversionFluxPipeline(
             guidance = guidance.expand(latents.shape[0])
         else:
             guidance = None
+        
+        #####sam###
+        use_attn_mask = True
+        save_attn_mask = True
+        sam_prompt = prompt  # <- replace with your actual prompt
+        device = self._execution_device
+
+        # Create the LangSAM model once
+        from lang_sam import LangSAM
+        import torchvision.transforms as T
+        import matplotlib.pyplot as plt
+        import os
+
+        transform = T.ToPILImage()
+        sam_model = LangSAM()
+        #image_tensor = image[0].detach().to(torch.float32).cpu()
+        #if image_tensor.min() < 0:  # normalize from [-1, 1] to [0, 1] if needed
+        #    image_tensor = (image_tensor + 1) / 2
+        #image_pil = transform(image)
+        from torchvision import transforms
+
+        # Example fix
+        #transform = transforms.ToTensor()
+        #image_tensor = transform(image).detach().to(torch.float32).cpu()
+
+        #image_pil=image_processor(image, return_tensors="pt")["pixel_values"][0].detach().to(torch.float32).cpu()
+
+        image_np = np.array(image)
+        # Run SAM once outside the loop
+        attn_mask, boxes, phrases, logits = sam_model.predict(image_np, sam_prompt)
+
+        # Process the mask to match latent dimensions
+        mask = None
+        if len(boxes):
+            if len(boxes) > 1:
+                attn_mask = attn_mask[:1]  # keep only the first mask
+            
+            # Save the attention mask (optional)
+            if save_attn_mask:
+                os.makedirs("results", exist_ok=True)  # Create directory if it doesn't exist
+                plt.imsave(
+                    "results/sam_mask.png",
+                    attn_mask[0].float().cpu().clamp(0, 1).numpy(),
+                    cmap="gray"
+                )
+        # Resize the mask to match latent dimensions
+        from torchvision.transforms import Resize
+        h = height // self.vae_scale_factor
+        w = width // self.vae_scale_factor
+        
+        # Convert to tensor and resize
+        attn_mask_tensor = torch.from_numpy(attn_mask[0]).float().unsqueeze(0).unsqueeze(0)
+        resized_mask = Resize((h//2, w//2))(attn_mask_tensor).to(device)
+        
+        # Pack mask to match latent format (same as latents format)
+        mask = self._pack_latents(resized_mask, 
+                                batch_size, 
+                                1, 
+                                h, 
+                                w)
+        mask = mask.expand_as(ori_latents)
 
         if do_rf_inversion:
             y_0 = image_latents.clone()
@@ -876,47 +940,13 @@ class RFInversionFluxPipeline(
                 )[0]
 
                 latents_dtype = latents.dtype
-                
-         
                 if do_rf_inversion:
                     v_t = -noise_pred
-                    
-                    x_1 = latents + v_t * (1 - t_i)
-
-                    y_hat_0 = x_1.clone().detach().requires_grad_(True)
-                    optimizer = torch.optim.Adam([y_hat_0], lr=0.1)
-                    
-                    # Add this tqdm wrapper around the optimization loop
-                    num_opt_steps = 10
-                    opt_progress = tqdm(range(num_opt_steps), desc=f"Timestep {i}/{len(timesteps)-1} optimization", 
-                                        leave=False, position=1)
-                    best_loss = float('inf')
-                    
-                    for opt_step in opt_progress:
-                        loss1 = torch.nn.functional.mse_loss(mask * ori_latents, mask * y_hat_0)
-                        loss2 = torch.nn.functional.mse_loss(x_1, y_hat_0)
-                        loss = loss1 + lambda_weight * loss2
-                        optimizer.zero_grad()
-                        loss.backward()
-                        optimizer.step()
-                        
-                        # Update progress bar with loss values
-                        opt_progress.set_postfix({
-                            'loss': f"{loss.item():.4f}",
-                            'mask_loss': f"{loss1.item():.4f}", 
-                            'pred_loss': f"{loss2.item():.4f}"
-                        })
-                        
-                        # Track best loss
-                        if loss.item() < best_loss:
-                            best_loss = loss.item()
-                    
-                    v_t_cond = (y_hat_0 - latents) / (1 - t_i)
+                    v_t_cond = (y_0 - latents) / (1 - t_i)
                     eta_t = eta if start_timestep <= i < stop_timestep else 0.0
                     if decay_eta:
                         eta_t = eta_t * (1 - i / num_inference_steps) ** eta_decay_power  # Decay eta over the loop
                     v_hat_t = v_t + eta_t * (v_t_cond - v_t)
-
 
                     # SDE Eq: 17 from https://arxiv.org/pdf/2410.10792
                     latents = latents + v_hat_t * (sigmas[i] - sigmas[i + 1])
@@ -1093,20 +1123,16 @@ class RFInversionFluxPipeline(
     
 if __name__ == "__main__":
     import argparse
-    #import wandb
     import torch
     from PIL import Image
-    from io import BytesIO
-    import requests
+    from diffusers import FluxPipeline
     from diffusers.utils import load_image
-    from pipeline_flux_rf_inversion_yhat import FluxRFInversionPipeline
-   # from diffusers import FluxImg2ImgPipeline
+    from pipeline_flux_rf_inversion_edit import FluxRFInversionPipeline
 
     def main():
         parser = argparse.ArgumentParser(description="Run Flux RF Inversion Pipeline")
         parser.add_argument("--model", type=str, default="black-forest-labs/FLUX.1-dev")
-        parser.add_argument("--image", type=str, required=True)
-        #parser.add_argument("--image", type=str, default="https://raw.githubusercontent.com/CompVis/stable-diffusion/main/assets/stable-samples/img2img/sketch-mountains-input.jpg")
+        parser.add_argument("--image", type=str, default="https://raw.githubusercontent.com/CompVis/stable-diffusion/main/assets/stable-samples/img2img/sketch-mountains-input.jpg")
         parser.add_argument("--prompt", type=str, default="cat wizard, gandalf, lord of the rings, detailed, fantasy, cute, adorable, Pixar, Disney, 8k")
         parser.add_argument("--prompt_2", type=str)
         parser.add_argument("--num_inference_steps", type=int, default=28)
@@ -1121,57 +1147,52 @@ if __name__ == "__main__":
 
         args = parser.parse_args()
 
-        #wandb.init(project="rf-inversion-debug", name="cli-run")
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        
 
-    #    if args.use_img2img:
-    #        pipe = FluxImg2ImgPipeline.from_pretrained(args.model, torch_dtype=torch.bfloat16, cache_dir="storage/ice-shared/ae8803che/lmkh3/")
-        #else:
-        #pipe = FluxRFInversionPipeline.from_pretrained(args.model, torch_dtype=torch.bfloat16, cahce_dir="/storage/ice-shared/ae8803che/lmkh3/")
+        #pipe = FluxRFInversionPipeline.from_pretrained(args.model, cache_dir="/storage/ice-shared/ae8803che/lmkh3/", torch_dtype=torch.bfloat16)
         
-        #
-        
-        # breakpoint()
         pipe = FluxPipeline.from_pretrained(
-        args.model,
-        torch_dtype=torch.bfloat16,
-        cache_dir="/storage/ice-shared/ae8803che/lmkh3/",
-        custom_pipeline="pipeline_flux_rf_inversion"
-    )
-
-            
+            "black-forest-labs/FLUX.1-dev",
+            torch_dtype=torch.bfloat16,
+            cache_dir="/storage/ice-shared/ae8803che/lmkh3/"
+        )
         pipe.to("cuda")
-        pipe = FluxRFInversionPipeline.from_pipe(pipe) 
+        init_image = Image.open(args.image).resize((1024, 1024))
+        
+        #set_seed(999)
+        pipe_rf_inversion = FluxRFInversionPipeline.from_pipe(pipe)
 
-        if args.image.startswith("http"):
-            init_image = load_image(args.image).resize((1024, 1024))
-        else:
-            init_image = Image.open(args.image).resize((1024, 1024))
-            
+        inverted_latents, image_latents, latent_image_ids = pipe_rf_inversion.invert(
+            image=init_image, 
+            num_inversion_steps=28, 
+            gamma=0.5
+        )
 
-        prompt_2 = args.prompt_2 if args.prompt_2 else args.prompt
-        save_base, ext = args.output.rsplit(".", 1)
+        edited_image = pipe_rf_inversion(
+            prompt=args.prompt,
+            inverted_latents=inverted_latents,
+            image=init_image,
+            image_latents=image_latents,
+            latent_image_ids=latent_image_ids,
+            start_timestep=0,
+            stop_timestep=7/28,
+            num_inference_steps=28,
+            eta=0.9,    
+            #enable_sde=enable_sde,
+        ).images[0]
 
-        for i in range(args.num_images):
-            kwargs = {
-                "gamma": args.gamma,
-                "eta": args.eta,
-                "start_timestep": args.start_timestep,
-                "stop_timestep": args.stop_timestep
-            } #if not args.use_img2img else dict()
+        save_dir = "./results/"
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir)
+        image_save_path = os.path.join(save_dir, f"rf_inversion_{'sde' if enable_sde else 'ode'}_sampling.png")
+        edited_image.save(image_save_path)
+        print('Results saved here: ', image_save_path)
 
-            result = pipe(
-                prompt=args.prompt,
-                prompt_2=prompt_2,
-                image=init_image,
-                num_inference_steps=args.num_inference_steps,
-                strength=args.strength,
-                guidance_scale=args.guidance_scale,
-                **kwargs
-            )
 
-            result.images[0].save(f"{save_base}_{i}.{ext}")
-            print(f"Output image saved as {save_base}_{i}.{ext}")
+
+
+        
+        
+        
 
     main()

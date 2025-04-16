@@ -1224,13 +1224,8 @@ if __name__ == "__main__":
         args.model,
         torch_dtype=torch.bfloat16,
         cache_dir="/storage/ice-shared/ae8803che/lmkh3/",
-        custom_pipeline="pipeline_flux_rf_inversion"
-    )
-
-            
-            
-
-        pipe.to("cuda")
+        custom_pipeline="pipeline_flux_rf_inversion").to("cuda")
+        
         pipe = FluxRFInversionPipeline.from_pipe(pipe) 
 
         if args.image.startswith("http"):
@@ -1252,7 +1247,7 @@ if __name__ == "__main__":
             result = pipe(
                 prompt=args.prompt,
                 prompt_2=prompt_2,
-                image=init_image,
+                image_latents=init_image,
                 num_inference_steps=args.num_inference_steps,
                 strength=args.strength,
                 guidance_scale=args.guidance_scale,
