@@ -877,8 +877,26 @@ class FluxRFInversionPipeline(
         #image_pil=image_processor(image, return_tensors="pt")["pixel_values"][0].detach().to(torch.float32).cpu()
 
         image_np = np.array(image)
+        # Lang-SAM expects PIL images, not numpy arrays
+        from PIL import Image
+
+        # Convert numpy array to PIL if needed
+        if isinstance(image, np.ndarray):
+            image_pil = Image.fromarray(image)
+        elif hasattr(image, "convert"):  # Already a PIL image
+            image_pil = image
+        else:
+            raise TypeError(f"Expected PIL Image or numpy array, got {type(image)}")
+
+        # Lang-SAM expects a list of images
+        if not isinstance(image_pil, list):
+            image_pil = [image_pil]
+            
+        # Convert prompt to list format as required by Lang-SAM
+        sam_prompt_list = [sam_prompt] if isinstance(sam_prompt, str) else sam_prompt
+
         # Run SAM once outside the loop
-        attn_mask, boxes, phrases, logits = sam_model.predict(image_np, sam_prompt)
+        attn_mask, boxes, phrases, logits = sam_model.predict(image_pil, sam_prompt_list)
 
         # Process the mask to match latent dimensions
         mask = None
@@ -909,7 +927,7 @@ class FluxRFInversionPipeline(
                                 1, 
                                 h, 
                                 w)
-        mask = mask.expand_as(ori_latents)
+        mask = mask.expand_as(latents)
 
         if do_rf_inversion:
             y_0 = image_latents.clone()
